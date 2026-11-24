@@ -1,0 +1,266 @@
+#!/usr/bin/env bash
+#
+# Antigravity & Antigravity IDE Updater (Linux)
+# Updates applications from https://antigravity.google/download
+#
+
+set -euo pipefail
+
+DOWNLOAD_PAGE_URL="https://antigravity.google/download"
+IDE_DIR="/opt/antigravity-ide/Antigravity-IDE"
+APP_DIR="$HOME/.local/share/antigravity"
+USER_AGENT="Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36"
+
+CHECK_ONLY=false
+AUTO_CONFIRM=false
+FORCE_UPDATE=false
+TARGET_IDE=true
+TARGET_APP=true
+
+show_help() {
+    cat << 'EOF'
+Usage: antigravity-update [OPTIONS]
+
+Seamless updater for Google Antigravity & Antigravity IDE on Linux.
+
+Options:
+  -c, --check       Check for updates without installing
+  -y, --yes         Proceed without confirmation prompts
+  -f, --force       Force update even if installed version matches
+  --ide             Target Antigravity IDE only
+  --app             Target Antigravity desktop application only
+  -h, --help        Display this help message
+
+Examples:
+  antigravity-update          # Check both and update if new release is found
+  antigravity-update -c       # Check versions only
+  antigravity-update --ide    # Update IDE only
+EOF
+}
+
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        -c|--check)
+            CHECK_ONLY=true
+            shift
+            ;;
+        -y|--yes)
+            AUTO_CONFIRM=true
+            shift
+            ;;
+        -f|--force)
+            FORCE_UPDATE=true
+            shift
+            ;;
+        --ide)
+            TARGET_IDE=true
+            TARGET_APP=false
+            shift
+            ;;
+        --app)
+            TARGET_APP=true
+            TARGET_IDE=false
+            shift
+            ;;
+        -h|--help)
+            show_help
+            exit 0
+            ;;
+        *)
+            echo "Unknown option: $1" >&2
+            show_help
+            exit 1
+            ;;
+    esac
+done
+
+case "$(uname -m)" in
+    x86_64|amd64)
+        ARCH="x64"
+        ;;
+    aarch64|arm64)
+        ARCH="arm"
+        ;;
+    *)
+        echo "Error: Unsupported architecture: $(uname -m)" >&2
+        exit 1
+        ;;
+esac
+
+version_gt() {
+    local v1 v2 higher
+    v1=$(echo "$1" | grep -o -E '^[0-9]+(\.[0-9]+)*' || true)
+    v2=$(echo "$2" | grep -o -E '^[0-9]+(\.[0-9]+)*' || true)
+    if [ -z "$v1" ] || [ -z "$v2" ]; then
+        [ "$1" != "$2" ]
+        return
+    fi
+    if [ "$v1" = "$v2" ]; then
+        return 1
+    fi
+    higher=$(printf '%s\n%s\n' "$v1" "$v2" | sort -V | tail -n 1)
+    [ "$higher" = "$v1" ]
+}
+
+get_local_ide_version() {
+    if [ -f "$IDE_DIR/.version" ]; then
+        head -n 1 "$IDE_DIR/.version"
+    elif [ -f "$IDE_DIR/resources/app/product.json" ]; then
+        grep -o '"ideVersion": *"[^"]*"' "$IDE_DIR/resources/app/product.json" 2>/dev/null | cut -d'"' -f4 || echo "unknown"
+    else
+        echo "not installed"
+    fi
+}
+
+get_local_app_version() {
+    if [ -f "$APP_DIR/.version" ]; then
+        head -n 1 "$APP_DIR/.version"
+    elif [ -f "$APP_DIR/resources/app.asar" ]; then
+        strings "$APP_DIR/resources/app.asar" 2>/dev/null | grep -A 3 -m 1 '"name": "antigravity"' | grep '"version"' | cut -d'"' -f4 || echo "unknown"
+    else
+        echo "not installed"
+    fi
+}
+
+echo "Checking for Antigravity updates (Arch: linux-${ARCH})..."
+
+HTML=$(curl -fsSL -A "$USER_AGENT" "$DOWNLOAD_PAGE_URL" || true)
+if [ -z "$HTML" ]; then
+    echo "Error: Failed to fetch download page from $DOWNLOAD_PAGE_URL" >&2
+    exit 1
+fi
+
+IDE_URL=$(echo "$HTML" | grep -o -E "https://[^\"' >]+linux-${ARCH}/Antigravity(%20| )IDE\.tar\.gz" | head -n 1 || true)
+APP_URL=$(echo "$HTML" | grep -o -E "https://[^\"' >]+linux-${ARCH}/Antigravity\.tar\.gz" | head -n 1 || true)
+
+IDE_REMOTE_VER=""
+APP_REMOTE_VER=""
+[ -n "$IDE_URL" ] && IDE_REMOTE_VER=$(echo "$IDE_URL" | sed -n 's|.*/stable/\([^/]*\)/.*|\1|p')
+[ -n "$APP_URL" ] && APP_REMOTE_VER=$(echo "$APP_URL" | sed -n 's|.*/antigravity-hub/\([^/]*\)/.*|\1|p')
+
+IDE_LOCAL_VER=$(get_local_ide_version)
+APP_LOCAL_VER=$(get_local_app_version)
+
+UPDATE_IDE=false
+UPDATE_APP=false
+
+echo ""
+echo "Application Status:"
+
+if [ "$TARGET_IDE" = true ]; then
+    if [ -z "$IDE_URL" ]; then
+        echo "  • Antigravity IDE : Not available for linux-${ARCH}"
+    else
+        if [ "$FORCE_UPDATE" = true ]; then
+            UPDATE_IDE=true
+            echo "  • Antigravity IDE : Force update ($IDE_LOCAL_VER -> $IDE_REMOTE_VER)"
+        elif version_gt "$IDE_REMOTE_VER" "$IDE_LOCAL_VER"; then
+            UPDATE_IDE=true
+            echo "  • Antigravity IDE : Update available ($IDE_LOCAL_VER -> $IDE_REMOTE_VER)"
+        else
+            echo "  • Antigravity IDE : Up to date ($IDE_LOCAL_VER)"
+        fi
+    fi
+fi
+
+if [ "$TARGET_APP" = true ]; then
+    if [ -z "$APP_URL" ]; then
+        echo "  • Antigravity     : Not available for linux-${ARCH}"
+    else
+        if [ "$FORCE_UPDATE" = true ]; then
+            UPDATE_APP=true
+            echo "  • Antigravity     : Force update ($APP_LOCAL_VER -> $APP_REMOTE_VER)"
+        elif version_gt "$APP_REMOTE_VER" "$APP_LOCAL_VER"; then
+            UPDATE_APP=true
+            echo "  • Antigravity     : Update available ($APP_LOCAL_VER -> $APP_REMOTE_VER)"
+        else
+            echo "  • Antigravity     : Up to date ($APP_LOCAL_VER)"
+        fi
+    fi
+fi
+
+if [ "$CHECK_ONLY" = true ]; then
+    exit 0
+fi
+
+if [ "$UPDATE_IDE" = false ] && [ "$UPDATE_APP" = false ]; then
+    echo ""
+    echo "All targeted applications are already up to date!"
+    exit 0
+fi
+
+if [ "$AUTO_CONFIRM" = false ] && [ -t 0 ]; then
+    echo ""
+    read -r -p "Proceed with the update? [Y/n] " response
+    case "$response" in
+        [yY][eE][sS]|[yY]|"")
+            ;;
+        *)
+            echo "Update cancelled."
+            exit 0
+            ;;
+    esac
+fi
+
+install_package() {
+    local name="$1"
+    local url="$2"
+    local version="$3"
+    local target_dir="$4"
+    local bin_name="$5"
+
+    echo ""
+    echo "=> Updating ${name} to ${version}..."
+
+    if pgrep -f "$bin_name" >/dev/null 2>&1; then
+        echo "   [Notice] ${name} is currently running. Files will update cleanly; please restart the app when done."
+    fi
+
+    local tmp_dir
+    tmp_dir=$(mktemp -d -t antigravity-update-XXXXXX)
+    local archive="${tmp_dir}/package.tar.gz"
+
+    echo "   Downloading package..."
+    curl -# -fL -A "$USER_AGENT" -o "$archive" "$url"
+
+    echo "   Extracting archive..."
+    mkdir -p "${tmp_dir}/extracted"
+    tar -xzf "$archive" -C "${tmp_dir}/extracted"
+
+    local extracted_payload
+    local dir_count
+    dir_count=$(find "${tmp_dir}/extracted" -mindepth 1 -maxdepth 1 -type d | wc -l)
+    if [ "$dir_count" -eq 1 ]; then
+        extracted_payload=$(find "${tmp_dir}/extracted" -mindepth 1 -maxdepth 1 -type d)
+    else
+        extracted_payload="${tmp_dir}/extracted"
+    fi
+
+    echo "   Installing to ${target_dir}..."
+    mkdir -p "$target_dir"
+    if command -v rsync >/dev/null 2>&1; then
+        rsync -a -I --delete --exclude='.version' "${extracted_payload}/" "${target_dir}/"
+    else
+        cp -a "${extracted_payload}/." "${target_dir}/"
+    fi
+
+    if [ -f "${target_dir}/${bin_name}" ]; then
+        chmod +x "${target_dir}/${bin_name}"
+    fi
+
+    echo "$version" > "${target_dir}/.version"
+    rm -rf "$tmp_dir"
+
+    echo "✓ ${name} updated successfully to ${version}!"
+}
+
+if [ "$UPDATE_IDE" = true ]; then
+    install_package "Antigravity IDE" "$IDE_URL" "$IDE_REMOTE_VER" "$IDE_DIR" "antigravity-ide"
+fi
+
+if [ "$UPDATE_APP" = true ]; then
+    install_package "Antigravity" "$APP_URL" "$APP_REMOTE_VER" "$APP_DIR" "antigravity"
+fi
+
+echo ""
+echo "Done! All updates completed successfully."
